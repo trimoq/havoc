@@ -1,0 +1,17 @@
+[package]
+name = "havoc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+env_logger = "0.11.3"
+log = "0.4.21"
+memmap2 = "0.9.4"
+anyhow = "1.0"
+nix = { version = "=0.29.0", features = ["fs", "personality", "process", "ptrace"] }
+
+[[bin]]
+name="testee"
+
+[[bin]]
+name="forker"

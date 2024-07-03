@@ -19,7 +19,9 @@ fn main() {
     match unsafe { fork() } {
         Ok(ForkResult::Child) => {
             info!("Forker child running with pid {}", process::id());
-            mmap_loop();
+            thread::spawn(||{
+                mmap_loop().expect("Could not mmap");
+            }).join().unwrap();
         }
         Ok(ForkResult::Parent { child }) => {
             info!(
@@ -34,23 +36,12 @@ fn main() {
     };
 }
 
-fn mmap_loop() {
-    loop {
-        match do_mmap() {
-            Ok(_) => info!("Forker done"),
-            Err(e) => {
-                error!("Mmap failed: {:?}", e)
-            }
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-}
-
-fn do_mmap() -> Result<()> {
+fn mmap_loop()-> Result<()> {
     let file = OpenOptions::new()
         .write(true)
         .read(true)
         .create(true)
+        .truncate(true)
         .open("file.bin")
         .context("Could not open file")?;
 
@@ -69,10 +60,19 @@ fn do_mmap() -> Result<()> {
             .context("Could not map file")?
     };
 
+    loop {
+        match flush_map(&mut mmap){
+            Ok(_) => info!("flush ok"),
+            Err(e) => error!("Could not flush map: {e}"),
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn flush_map(mmap: &mut memmap2::MmapMut) -> Result<(), anyhow::Error> {
+    info!("map ptr: {:p}", mmap.as_ptr());
     mmap[0] = 42;
-
-    mmap.flush().with_context(|| "Could not flush file")?;
-
+    mmap.flush()?;
     Ok(())
 }
 

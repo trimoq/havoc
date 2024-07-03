@@ -29,6 +29,7 @@ fn do_mmap() -> Result<()> {
         .write(true)
         .read(true)
         .create(true)
+        .truncate(true)
         .open("file.bin")
         .context("Could not open file")?;
 

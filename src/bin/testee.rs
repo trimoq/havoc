@@ -38,7 +38,7 @@ fn main() -> Result<()> {
             .context("Could not map file")?
     };
 
-    for i in 0 .. 10 {
+    for _ in 0..10 {
         match flush_mmap(&mut mmap) {
             Ok(_) => info!("Testee done"),
             Err(e) => {

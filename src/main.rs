@@ -73,26 +73,28 @@ fn run_parent(pid: Pid) {
     trace_syscall(pid, None).expect("Parent failed tracing");
 
     let mut msync_counter = 0;
-    loop{
-         match wait_for_signal(&mut msync_counter) {
-             Ok(_) => {/* nop */},
-             Err(e) => {
+    loop {
+        match wait_for_signal(&mut msync_counter) {
+            Ok(_) => { /* nop */ }
+            Err(e) => {
                 match e {
-                    HavocError::WaitError => error!("Wait error"),
-                    HavocError::RegisterError(e) => error!("RegisterError: {e}"),
-                    HavocError::PtraceError(e) =>error!("PtraceError: {e}"),
-                    HavocError::ProcError(e) => error!("ProcError: {e}"),
+                    HavocError::Wait => error!("Wait error"),
+                    HavocError::Register(e) => error!("RegisterError: {e}"),
+                    HavocError::Ptrace(e) => error!("PtraceError: {e}"),
+                    HavocError::Proc(e) => error!("ProcError: {e}"),
                 }
                 break;
-             },
-         }
+            }
+        }
     }
     info!("===========  Havoc has been done, intercepted {msync_counter} msync calls  ===========");
 }
 
 fn wait_for_signal(msync_counter: &mut i32) -> Result<(), HavocError> {
     match wait() {
-        Ok(WaitStatus::Stopped(pid_t, sig_num)) => handle_child_stopped(sig_num, pid_t, msync_counter),
+        Ok(WaitStatus::Stopped(pid_t, sig_num)) => {
+            handle_child_stopped(sig_num, pid_t, msync_counter)
+        }
 
         Ok(WaitStatus::Exited(pid, exit_status)) => {
             debug!("Child with pid: {} exited with status {}", pid, exit_status);
@@ -118,21 +120,23 @@ fn wait_for_signal(msync_counter: &mut i32) -> Result<(), HavocError> {
 
         Err(err) => {
             error!("An error occurred: {:?}", err);
-            Err(HavocError::WaitError)
+            Err(HavocError::Wait)
         }
     }
 }
 
-fn handle_child_stopped(sig_num: Signal, pid_t: Pid, msync_counter: &mut i32) -> Result<(), HavocError> {
+fn handle_child_stopped(
+    sig_num: Signal,
+    pid_t: Pid,
+    msync_counter: &mut i32,
+) -> Result<(), HavocError> {
     match sig_num {
         Signal::SIGTRAP => handle_sigtrap(pid_t, msync_counter),
         Signal::SIGSTOP => {
             debug!("SIGSTOP in {pid_t}");
             trace_syscall(pid_t, Some(Signal::SIGSTOP))
         }
-        Signal::SIGSEGV => {
-            trace_syscall(pid_t,Some(Signal::SIGSEGV))
-        }
+        Signal::SIGSEGV => trace_syscall(pid_t, Some(Signal::SIGSEGV)),
         Signal::SIGWINCH => {
             debug!("Received SIGWINCH");
             trace_syscall(pid_t, Some(Signal::SIGWINCH))
@@ -146,7 +150,7 @@ fn handle_child_stopped(sig_num: Signal, pid_t: Pid, msync_counter: &mut i32) ->
 
 fn handle_sigtrap(pid_t: Pid, msync_counter: &mut i32) -> Result<(), HavocError> {
     debug!("SIGTRAP in {pid_t}");
-    let regs = ptrace::getregs(pid_t).map_err(|e| HavocError::RegisterError(e))?;
+    let regs = ptrace::getregs(pid_t).map_err(HavocError::Register)?;
 
     if regs.orig_rax == SYS_msync as u64 {
         if regs.rax == -ENOSYS as u64 {
@@ -155,8 +159,7 @@ fn handle_sigtrap(pid_t: Pid, msync_counter: &mut i32) -> Result<(), HavocError>
             info!("Exit of syscall in {pid_t} : {}", regs.orig_rax);
             handle_msync(msync_counter, regs, pid_t)?;
         }
-    }
-    else {
+    } else {
         debug!("Detected other syscall in {pid_t} : {}", regs.orig_rax);
     }
     trace_syscall(pid_t, None)
@@ -172,23 +175,20 @@ fn handle_msync(
 
     let addr = regs.rdi;
 
-    let proc = Process::new(pid.as_raw())
-        .map_err(|e| HavocError::ProcError(e))?;
+    let proc = Process::new(pid.as_raw()).map_err(HavocError::Proc)?;
 
-    let mappings = proc.maps()
-        .map_err(|e| HavocError::ProcError(e))?;
+    let mappings = proc.maps().map_err(HavocError::Proc)?;
 
     let map = mappings
         .iter()
-        .filter(|m| m.address.0 <= addr && m.address.1 >= addr)
-        .next();
+        .find(|m| m.address.0 <= addr && m.address.1 >= addr);
 
     match map {
         Some(map) => match &map.pathname {
             procfs::process::MMapPath::Path(p) => {
                 info!("Found map: {:?}", p);
             }
-            e => warn!("Did not implement path type: {:?}",e ),
+            e => warn!("Did not implement path type: {:?}", e),
         },
         None => todo!(),
     }
@@ -208,20 +208,20 @@ fn setup_trace_forks(pid: Pid) -> Result<(), HavocError> {
             .union(Options::PTRACE_O_TRACEVFORK),
     )
     .context("Could not set options to follow forks")
-    .map_err(|e| HavocError::PtraceError(e))
+    .map_err(HavocError::Ptrace)
 }
 
 /// Allow the child to execute to the next syscall
 fn trace_syscall<T: Into<Option<Signal>>>(pid: Pid, sig: T) -> Result<(), HavocError> {
     ptrace::syscall(pid, sig)
         .context("Could not trace to next syscall")
-        .map_err(|e| HavocError::PtraceError(e))
+        .map_err(HavocError::Ptrace)
 }
 
 #[derive(Debug)]
 enum HavocError {
-    WaitError,
-    RegisterError(Errno),
-    PtraceError(Error),
-    ProcError(ProcError),
+    Wait,
+    Register(Errno),
+    Ptrace(Error),
+    Proc(ProcError),
 }

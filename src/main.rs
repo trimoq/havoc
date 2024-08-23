@@ -48,17 +48,13 @@ fn run_child() {
 
     // let e = Command::new("./target/release/testee").exec();
 
-    // let e = Command::new("./target/release/forker").exec();
+    let e = Command::new("./target/release/forker").exec();
 
     // let e = Command::new("/usr/lib/jvm/java-17-openjdk/bin/java")
     //     .arg("-jar")
     //     .arg("jvm-test/target/jvm-test-1.0-SNAPSHOT-jar-with-dependencies.jar")
     //     .exec();
 
-    let e = Command::new("/usr/lib/jvm/java-17-openjdk/bin/java")
-        .arg("-jar")
-        .arg("/home/marco/Documents/AxonIQ/AxonServer/axon-server/axonserver-enterprise/target/axonserver-enterprise-2024.2.0-SNAPSHOT-exec.jar")
-        .exec();
 
     error!("Exec failed, this process should be dead: {e}");
     unreachable!()

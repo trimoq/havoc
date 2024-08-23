@@ -1,8 +1,6 @@
 use std::{
     os::unix::process::CommandExt,
     process::{self, Command},
-    thread::Thread,
-    time::Duration,
 };
 
 use anyhow::{Context, Error};
@@ -10,7 +8,7 @@ use env_logger::Env;
 use log::{debug, error, info, warn};
 use nix::{
     errno::Errno,
-    libc::{SYS_clone, SYS_clone3, SYS_msync, ENOSYS},
+    libc::{SYS_msync, ENOSYS},
     sys::{
         ptrace::{self, Options},
         signal::Signal,
@@ -50,12 +48,17 @@ fn run_child() {
 
     // let e = Command::new("./target/release/testee").exec();
 
-    let e = Command::new("./target/release/forker").exec();
+    // let e = Command::new("./target/release/forker").exec();
 
     // let e = Command::new("/usr/lib/jvm/java-17-openjdk/bin/java")
     //     .arg("-jar")
     //     .arg("jvm-test/target/jvm-test-1.0-SNAPSHOT-jar-with-dependencies.jar")
     //     .exec();
+
+    let e = Command::new("/usr/lib/jvm/java-17-openjdk/bin/java")
+        .arg("-jar")
+        .arg("/home/marco/Documents/AxonIQ/AxonServer/axon-server/axonserver-enterprise/target/axonserver-enterprise-2024.2.0-SNAPSHOT-exec.jar")
+        .exec();
 
     error!("Exec failed, this process should be dead: {e}");
     unreachable!()
@@ -67,11 +70,22 @@ fn run_parent(pid: Pid) {
     info!("Child process ready with signal: {ws:?}, will ask it to continue untill syscall");
 
     setup_trace_forks(pid).expect("Parent failed tracing");
-    trace_syscall(pid).expect("Parent failed tracing");
+    trace_syscall(pid, None).expect("Parent failed tracing");
 
     let mut msync_counter = 0;
-    while wait_for_signal(&mut msync_counter).is_ok() {
-        // nop
+    loop{
+         match wait_for_signal(&mut msync_counter) {
+             Ok(_) => {/* nop */},
+             Err(e) => {
+                match e {
+                    HavocError::WaitError => error!("Wait error"),
+                    HavocError::RegisterError(e) => error!("RegisterError: {e}"),
+                    HavocError::PtraceError(e) =>error!("PtraceError: {e}"),
+                    HavocError::ProcError(e) => error!("ProcError: {e}"),
+                }
+                break;
+             },
+         }
     }
     info!("===========  Havoc has been done, intercepted {msync_counter} msync calls  ===========");
 }
@@ -81,8 +95,8 @@ fn wait_for_signal(msync_counter: &mut i32) -> Result<(), HavocError> {
         Ok(WaitStatus::Stopped(pid_t, sig_num)) => handle_child_stopped(sig_num, pid_t, msync_counter),
 
         Ok(WaitStatus::Exited(pid, exit_status)) => {
-            warn!("Child with pid: {} exited with status {}", pid, exit_status);
-            Err(HavocError::ChildExit)
+            debug!("Child with pid: {} exited with status {}", pid, exit_status);
+            Ok(())
         }
 
         Ok(WaitStatus::PtraceEvent(pid, Signal::SIGTRAP, _)) => {
@@ -91,9 +105,9 @@ fn wait_for_signal(msync_counter: &mut i32) -> Result<(), HavocError> {
                 In this case, we instruct linux to notify us again, should that child fork
                 Then we wait for syscalls in the process to happen.
             */
-            info!("PtraceEvent - SIGTRAP for: {pid} ");
+            debug!("PtraceEvent - SIGTRAP for: {pid} ");
             setup_trace_forks(pid)?;
-            trace_syscall(pid)?;
+            trace_syscall(pid, Some(Signal::SIGTRAP))?;
             Ok(())
         }
 
@@ -113,40 +127,26 @@ fn handle_child_stopped(sig_num: Signal, pid_t: Pid, msync_counter: &mut i32) ->
     match sig_num {
         Signal::SIGTRAP => handle_sigtrap(pid_t, msync_counter),
         Signal::SIGSTOP => {
-            warn!("Sigstop in {pid_t}");
-            trace_syscall(pid_t)
-            // ptrace::syscall(pid_t, Signal::SIGCONT)
-            //     .context("Could not wait for syscall")
-            //     .map_err(|e| HavocError::PtraceError)
+            debug!("SIGSTOP in {pid_t}");
+            trace_syscall(pid_t, Some(Signal::SIGSTOP))
         }
         Signal::SIGSEGV => {
-            let regs = ptrace::getregs(pid_t).expect("Failed to get registers");
-            warn!("Segmentation fault in {pid_t} at 0x{:x}", regs.rip);
-            // std::thread::sleep(Duration::from_secs(4));
-            // trace_syscall(pid_t)?;
-
-            ptrace::syscall(pid_t, Signal::SIGSEGV)
-                .context("Could not wait for syscall")
-                .map_err(|e| HavocError::PtraceError(e))?;
-            // Err(HavocError::ChildStopSigsev)
-            Ok(())
+            trace_syscall(pid_t,Some(Signal::SIGSEGV))
         }
         Signal::SIGWINCH => {
-            info!("Received SIGWINCH");
-            trace_syscall(pid_t)
+            debug!("Received SIGWINCH");
+            trace_syscall(pid_t, Some(Signal::SIGWINCH))
         }
         _ => {
             warn!("Stopped with unexpected signal: {sig_num:?}");
-            // Err(HavocError::ChildStopUnknown)
-            trace_syscall(pid_t)
+            trace_syscall(pid_t, Some(sig_num))
         }
     }
 }
 
 fn handle_sigtrap(pid_t: Pid, msync_counter: &mut i32) -> Result<(), HavocError> {
-    info!("Stopped {pid_t} with SIGTRAP");
+    debug!("SIGTRAP in {pid_t}");
     let regs = ptrace::getregs(pid_t).map_err(|e| HavocError::RegisterError(e))?;
-    // info!("rax {:x}, original_rax {:x}", regs.rax, regs.orig_rax);
 
     if regs.orig_rax == SYS_msync as u64 {
         if regs.rax == -ENOSYS as u64 {
@@ -157,10 +157,9 @@ fn handle_sigtrap(pid_t: Pid, msync_counter: &mut i32) -> Result<(), HavocError>
         }
     }
     else {
-        info!("Detected other syscall in {pid_t} : {}", regs.orig_rax);
+        debug!("Detected other syscall in {pid_t} : {}", regs.orig_rax);
     }
-    trace_syscall(pid_t)
-    // Ok(())
+    trace_syscall(pid_t, None)
 }
 
 fn handle_msync(
@@ -189,7 +188,7 @@ fn handle_msync(
             procfs::process::MMapPath::Path(p) => {
                 info!("Found map: {:?}", p);
             }
-            _ => todo!(),
+            e => warn!("Did not implement path type: {:?}",e ),
         },
         None => todo!(),
     }
@@ -213,17 +212,14 @@ fn setup_trace_forks(pid: Pid) -> Result<(), HavocError> {
 }
 
 /// Allow the child to execute to the next syscall
-fn trace_syscall(pid: Pid) -> Result<(), HavocError> {
-    ptrace::syscall(pid, None)
-        .context("Could not wait for syscall")
+fn trace_syscall<T: Into<Option<Signal>>>(pid: Pid, sig: T) -> Result<(), HavocError> {
+    ptrace::syscall(pid, sig)
+        .context("Could not trace to next syscall")
         .map_err(|e| HavocError::PtraceError(e))
 }
 
 #[derive(Debug)]
 enum HavocError {
-    // ChildStopSigsev,
-    // ChildStopUnknown,
-    ChildExit,
     WaitError,
     RegisterError(Errno),
     PtraceError(Error),

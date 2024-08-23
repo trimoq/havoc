@@ -38,15 +38,16 @@ fn main() -> Result<()> {
             .context("Could not map file")?
     };
 
-    loop {
+    for i in 0 .. 10 {
         match flush_mmap(&mut mmap) {
             Ok(_) => info!("Testee done"),
             Err(e) => {
                 error!("Mmap failed: {:?}", e)
             }
         }
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(50));
     }
+    Ok(())
 }
 
 fn flush_mmap(mmap: &mut MmapMut) -> Result<()> {

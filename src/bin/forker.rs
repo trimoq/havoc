@@ -108,4 +108,5 @@ fn child_thread_wait(h: thread::JoinHandle<()>) {
         info!("Forker child is still running");
         thread::sleep(Duration::from_secs(1));
     }
+    info!("Forker child process (parent thread) will end, since child thread ended");
 }

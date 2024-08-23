@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Context;
+use anyhow::{Context, Error};
 use env_logger::Env;
 use log::{debug, error, info, warn};
 use nix::{
@@ -40,17 +40,17 @@ fn main() {
 }
 
 /*
- * The child process will only exec into the soon-to-be tracee
+ * The child process will become the soon-to-be tracee
  */
 fn run_child() {
     info!("havoc child process executing as {}", process::id());
 
-    // the pid won't change with exec
+    // the pid won't change with exec, so we ask to be traced
     ptrace::traceme().expect("OS could not be bothered to trace me");
 
-    // let e = Command::new("./target/debug/testee").exec();
+    // let e = Command::new("./target/release/testee").exec();
 
-    let e = Command::new("./target/debug/forker").exec();
+    let e = Command::new("./target/release/forker").exec();
 
     // let e = Command::new("/usr/lib/jvm/java-17-openjdk/bin/java")
     //     .arg("-jar")
@@ -62,7 +62,8 @@ fn run_child() {
 }
 
 fn run_parent(pid: Pid) {
-    let ws = wait().unwrap();
+    // wait for our child process to be ready
+    let ws = wait().expect("Parent failed waiting for child");
     info!("Child process ready with signal: {ws:?}, will ask it to continue untill syscall");
 
     setup_trace_forks(pid).expect("Parent failed tracing");
@@ -72,22 +73,21 @@ fn run_parent(pid: Pid) {
     while wait_for_signal(&mut msync_counter).is_ok() {
         // nop
     }
-    info!("Havoc has been done");
-    std::thread::sleep(Duration::from_secs(4));
+    info!("===========  Havoc has been done, intercepted {msync_counter} msync calls  ===========");
 }
 
 fn wait_for_signal(msync_counter: &mut i32) -> Result<(), HavocError> {
     match wait() {
-        Ok(WaitStatus::Stopped(pid_t, sig_num)) => handle_sigstop(sig_num, pid_t, msync_counter),
+        Ok(WaitStatus::Stopped(pid_t, sig_num)) => handle_child_stopped(sig_num, pid_t, msync_counter),
 
         Ok(WaitStatus::Exited(pid, exit_status)) => {
-            info!("Child with pid: {} exited with status {}", pid, exit_status);
+            warn!("Child with pid: {} exited with status {}", pid, exit_status);
             Err(HavocError::ChildExit)
         }
 
         Ok(WaitStatus::PtraceEvent(pid, Signal::SIGTRAP, _)) => {
             /*
-                We receive a PtraceEvent with SIGTRAP in case the child forks
+                We receive a PtraceEvent with SIGTRAP when the child forks.
                 In this case, we instruct linux to notify us again, should that child fork
                 Then we wait for syscalls in the process to happen.
             */
@@ -98,7 +98,7 @@ fn wait_for_signal(msync_counter: &mut i32) -> Result<(), HavocError> {
         }
 
         Ok(status) => {
-            warn!("Received status: {:?}", status);
+            error!("Received unhandled wait status: {:?}", status);
             Ok(())
         }
 
@@ -109,15 +109,15 @@ fn wait_for_signal(msync_counter: &mut i32) -> Result<(), HavocError> {
     }
 }
 
-fn handle_sigstop(sig_num: Signal, pid_t: Pid, msync_counter: &mut i32) -> Result<(), HavocError> {
+fn handle_child_stopped(sig_num: Signal, pid_t: Pid, msync_counter: &mut i32) -> Result<(), HavocError> {
     match sig_num {
         Signal::SIGTRAP => handle_sigtrap(pid_t, msync_counter),
         Signal::SIGSTOP => {
             warn!("Sigstop in {pid_t}");
-            // trace_syscall(pid_t)
-            ptrace::syscall(pid_t, Signal::SIGCONT)
-                .context("Could not wait for syscall")
-                .map_err(|e| HavocError::PtraceError)
+            trace_syscall(pid_t)
+            // ptrace::syscall(pid_t, Signal::SIGCONT)
+            //     .context("Could not wait for syscall")
+            //     .map_err(|e| HavocError::PtraceError)
         }
         Signal::SIGSEGV => {
             let regs = ptrace::getregs(pid_t).expect("Failed to get registers");
@@ -127,7 +127,7 @@ fn handle_sigstop(sig_num: Signal, pid_t: Pid, msync_counter: &mut i32) -> Resul
 
             ptrace::syscall(pid_t, Signal::SIGSEGV)
                 .context("Could not wait for syscall")
-                .map_err(|e| HavocError::PtraceError)?;
+                .map_err(|e| HavocError::PtraceError(e))?;
             // Err(HavocError::ChildStopSigsev)
             Ok(())
         }
@@ -144,7 +144,7 @@ fn handle_sigstop(sig_num: Signal, pid_t: Pid, msync_counter: &mut i32) -> Resul
 }
 
 fn handle_sigtrap(pid_t: Pid, msync_counter: &mut i32) -> Result<(), HavocError> {
-    // info!("Stopped {pid_t} with SIGTRAP");
+    info!("Stopped {pid_t} with SIGTRAP");
     let regs = ptrace::getregs(pid_t).map_err(|e| HavocError::RegisterError(e))?;
     // info!("rax {:x}, original_rax {:x}", regs.rax, regs.orig_rax);
 
@@ -156,14 +156,8 @@ fn handle_sigtrap(pid_t: Pid, msync_counter: &mut i32) -> Result<(), HavocError>
             handle_msync(msync_counter, regs, pid_t)?;
         }
     }
-    // else if  regs.orig_rax == SYS_clone as u64 {
-    //     warn!("Found clone: {}", regs.orig_rax);
-    // }
-    // else if  regs.orig_rax == SYS_clone3 as u64 {
-    //     warn!("Found clone3: {}", regs.orig_rax);
-    // }
     else {
-        // info!("Detected other syscall in {pid_t} : {}", regs.orig_rax);
+        info!("Detected other syscall in {pid_t} : {}", regs.orig_rax);
     }
     trace_syscall(pid_t)
     // Ok(())
@@ -179,9 +173,11 @@ fn handle_msync(
 
     let addr = regs.rdi;
 
-    let proc = Process::new(pid.as_raw()).map_err(|e| HavocError::ProcError(e))?;
+    let proc = Process::new(pid.as_raw())
+        .map_err(|e| HavocError::ProcError(e))?;
 
-    let mappings = proc.maps().map_err(|e| HavocError::ProcError(e))?;
+    let mappings = proc.maps()
+        .map_err(|e| HavocError::ProcError(e))?;
 
     let map = mappings
         .iter()
@@ -204,6 +200,7 @@ fn handle_msync(
     Ok(())
 }
 
+/// Setup the preace options to also trace fork, clone and vfork
 fn setup_trace_forks(pid: Pid) -> Result<(), HavocError> {
     ptrace::setoptions(
         pid,
@@ -212,22 +209,23 @@ fn setup_trace_forks(pid: Pid) -> Result<(), HavocError> {
             .union(Options::PTRACE_O_TRACEVFORK),
     )
     .context("Could not set options to follow forks")
-    .map_err(|e| HavocError::PtraceError)
+    .map_err(|e| HavocError::PtraceError(e))
 }
 
+/// Allow the child to execute to the next syscall
 fn trace_syscall(pid: Pid) -> Result<(), HavocError> {
     ptrace::syscall(pid, None)
         .context("Could not wait for syscall")
-        .map_err(|e| HavocError::PtraceError)
+        .map_err(|e| HavocError::PtraceError(e))
 }
 
 #[derive(Debug)]
 enum HavocError {
-    ChildStopSigsev,
-    ChildStopUnknown,
+    // ChildStopSigsev,
+    // ChildStopUnknown,
     ChildExit,
     WaitError,
     RegisterError(Errno),
-    PtraceError,
+    PtraceError(Error),
     ProcError(ProcError),
 }

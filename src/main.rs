@@ -25,7 +25,7 @@ fn main() {
     info!("havoc started with pid {}", process::id());
 
     match unsafe { fork() } {
-        Ok(ForkResult::Child) => run_child(),        
+        Ok(ForkResult::Child) => run_child(),
         Ok(ForkResult::Parent { child }) => run_parent(child),
         Err(e) => panic!("Could not fork main process: {}", e),
     };
@@ -48,7 +48,6 @@ fn run_child() {
     //     .arg("-jar")
     //     .arg("jvm-test/target/jvm-test-1.0-SNAPSHOT-jar-with-dependencies.jar")
     //     .exec();
-
 
     unreachable!("Exec failed, this process should be dead: {e}")
 }
@@ -107,9 +106,7 @@ fn wait_for_signal(msync_counter: &mut i32) -> Result<(), HavocError> {
             Ok(())
         }
 
-        Err(err) => {
-            Err(HavocError::Wait(err))
-        }
+        Err(err) => Err(HavocError::Wait(err)),
     }
 }
 

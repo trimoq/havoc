@@ -25,15 +25,9 @@ fn main() {
     info!("havoc started with pid {}", process::id());
 
     match unsafe { fork() } {
-        Ok(ForkResult::Child) => {
-            run_child();
-        }
-        Ok(ForkResult::Parent { child }) => {
-            run_parent(child);
-        }
-        Err(e) => {
-            panic!("Could not fork main process: {}", e);
-        }
+        Ok(ForkResult::Child) => run_child(),        
+        Ok(ForkResult::Parent { child }) => run_parent(child),
+        Err(e) => panic!("Could not fork main process: {}", e),
     };
 }
 
@@ -46,9 +40,9 @@ fn run_child() {
     // the pid won't change with exec, so we ask to be traced
     ptrace::traceme().expect("OS could not be bothered to trace me");
 
-    // let e = Command::new("./target/release/testee").exec();
+    let e = Command::new("./target/release/testee").exec();
 
-    let e = Command::new("./target/release/forker").exec();
+    // let e = Command::new("./target/release/forker").exec();
 
     // let e = Command::new("/usr/lib/jvm/java-17-openjdk/bin/java")
     //     .arg("-jar")
@@ -56,8 +50,7 @@ fn run_child() {
     //     .exec();
 
 
-    error!("Exec failed, this process should be dead: {e}");
-    unreachable!()
+    unreachable!("Exec failed, this process should be dead: {e}")
 }
 
 fn run_parent(pid: Pid) {
@@ -65,7 +58,7 @@ fn run_parent(pid: Pid) {
     let ws = wait().expect("Parent failed waiting for child");
     info!("Child process ready with signal: {ws:?}, will ask it to continue untill syscall");
 
-    setup_trace_forks(pid).expect("Parent failed tracing");
+    setup_tracing(pid).expect("Parent failed tracing");
     trace_syscall(pid, None).expect("Parent failed tracing");
 
     let mut msync_counter = 0;
@@ -74,7 +67,7 @@ fn run_parent(pid: Pid) {
             Ok(_) => { /* nop */ }
             Err(e) => {
                 match e {
-                    HavocError::Wait => error!("Wait error"),
+                    HavocError::Wait(e) => error!("Wait error: {e}"),
                     HavocError::Register(e) => error!("RegisterError: {e}"),
                     HavocError::Ptrace(e) => error!("PtraceError: {e}"),
                     HavocError::Proc(e) => error!("ProcError: {e}"),
@@ -104,19 +97,18 @@ fn wait_for_signal(msync_counter: &mut i32) -> Result<(), HavocError> {
                 Then we wait for syscalls in the process to happen.
             */
             debug!("PtraceEvent - SIGTRAP for: {pid} ");
-            setup_trace_forks(pid)?;
+            setup_tracing(pid)?;
             trace_syscall(pid, Some(Signal::SIGTRAP))?;
             Ok(())
         }
 
         Ok(status) => {
-            error!("Received unhandled wait status: {:?}", status);
+            warn!("Received unhandled wait status: {:?}", status);
             Ok(())
         }
 
         Err(err) => {
-            error!("An error occurred: {:?}", err);
-            Err(HavocError::Wait)
+            Err(HavocError::Wait(err))
         }
     }
 }
@@ -127,7 +119,10 @@ fn handle_child_stopped(
     msync_counter: &mut i32,
 ) -> Result<(), HavocError> {
     match sig_num {
-        Signal::SIGTRAP => handle_sigtrap(pid_t, msync_counter),
+        Signal::SIGTRAP => {
+            handle_sigtrap(pid_t, msync_counter)?;
+            trace_syscall(pid_t, None)
+        }
         Signal::SIGSTOP => {
             debug!("SIGSTOP in {pid_t}");
             trace_syscall(pid_t, Some(Signal::SIGSTOP))
@@ -158,7 +153,7 @@ fn handle_sigtrap(pid_t: Pid, msync_counter: &mut i32) -> Result<(), HavocError>
     } else {
         debug!("Detected other syscall in {pid_t} : {}", regs.orig_rax);
     }
-    trace_syscall(pid_t, None)
+    Ok(())
 }
 
 fn handle_msync(
@@ -196,7 +191,7 @@ fn handle_msync(
 }
 
 /// Setup the preace options to also trace fork, clone and vfork
-fn setup_trace_forks(pid: Pid) -> Result<(), HavocError> {
+fn setup_tracing(pid: Pid) -> Result<(), HavocError> {
     ptrace::setoptions(
         pid,
         Options::PTRACE_O_TRACEFORK
@@ -216,7 +211,7 @@ fn trace_syscall<T: Into<Option<Signal>>>(pid: Pid, sig: T) -> Result<(), HavocE
 
 #[derive(Debug)]
 enum HavocError {
-    Wait,
+    Wait(Errno),
     Register(Errno),
     Ptrace(Error),
     Proc(ProcError),
